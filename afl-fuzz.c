@@ -60,9 +60,123 @@
 #include <signal.h>
 #include <ctype.h>
 #include <fcntl.h>
+#include <stdint.h>
 
 #include <sys/stat.h>
 #include <sys/types.h>
+
+#include <WinSock2.h>
+#pragma comment(lib, "ws2_32.lib")
+
+#define MAX_STATSD_PACKET_SIZE 4096
+#define MAX_TAG_LEN 200
+#define METRIC_PREFIX "fuzzing"
+
+/*
+ * DogStatsD format ONLY
+ * metric.name:<value>|<type>|#key:value,key2:value2
+ */
+
+#define DOGSTATSD_TAGS_FORMAT "|#banner:%s,afl_version:%s"
+
+#define STATSD_TAGS_TYPE_SUFFIX 1
+#define STATSD_TAGS_SUFFIX_METRICS                \
+    METRIC_PREFIX ".start_time:%llu|g%s\n"        \
+    METRIC_PREFIX ".last_update:%llu|g%s\n"       \
+    METRIC_PREFIX ".run_time:%llu|g%s\n"          \
+    METRIC_PREFIX ".fuzzer_pid:%u|g%s\n"          \
+    METRIC_PREFIX ".cycles_done:%llu|g%s\n"       \
+    METRIC_PREFIX ".execs_done:%llu|g%s\n"        \
+    METRIC_PREFIX ".execs_per_sec:%0.02f|g%s\n"   \
+    METRIC_PREFIX ".paths_total:%u|g%s\n"         \
+    METRIC_PREFIX ".paths_favored:%u|g%s\n"       \
+    METRIC_PREFIX ".paths_found:%u|g%s\n"         \
+    METRIC_PREFIX ".paths_imported:%u|g%s\n"      \
+    METRIC_PREFIX ".max_depth:%u|g%s\n"           \
+    METRIC_PREFIX ".cur_path:%u|g%s\n"            \
+    METRIC_PREFIX ".pending_favs:%u|g%s\n"        \
+    METRIC_PREFIX ".pending_total:%llu|g%s\n"     \
+    METRIC_PREFIX ".variable_paths:%llu|g%s\n"    \
+    METRIC_PREFIX ".staility:%0.02f|g%s\n"        \
+    METRIC_PREFIX ".bitmap_cvg:%0.02f|g%s\n"      \
+    METRIC_PREFIX ".unique_crashes:%llu|g%s\n"    \
+    METRIC_PREFIX ".unique_hangs:%llu|g%s\n"      \
+    METRIC_PREFIX ".last_path:%llu|g%s\n"         \
+    METRIC_PREFIX ".last_crash:%llu|g%s\n"        \
+    METRIC_PREFIX ".last_hang:%llu|g%s\n"         \
+    METRIC_PREFIX ".execs_since_crash:%llu|g%s\n" \
+    METRIC_PREFIX ".exec_timeout:%u|g%s\n"        \
+    METRIC_PREFIX ".afl_banner:%s|g%s\n"          \
+    METRIC_PREFIX ".afl_version:%s|g%s\n"         \
+    METRIC_PREFIX ".command_line:%s|g%s\n"
+
+int sock;
+struct sockaddr_in server_addr;
+char buff[MAX_STATSD_PACKET_SIZE];
+
+static void statsd_socket_init(char* host, uint16_t port);
+
+static int statsd_send_metric(
+    unsigned long long start_time,
+    unsigned long long last_update,
+    unsigned long long run_time,
+    unsigned int       fuzzer_pid,
+    unsigned long long cycles_done,
+    unsigned long long execs_done,
+    float              execs_per_sec,
+    unsigned int       paths_total,
+    unsigned int       paths_favored,
+    unsigned int       paths_found,
+    unsigned int       paths_imported,
+    unsigned int       max_depth,
+    unsigned int       cur_path, 
+    unsigned int       pending_favs,
+    unsigned long long pending_total,
+    unsigned long long variable_paths,
+    float              stability,
+    float              bitmap_cvg,
+    unsigned long long unique_crashes,
+    unsigned long long unique_hangs,
+    unsigned long long last_path,
+    unsigned long long last_crash,
+    unsigned long long last_hang,
+    unsigned long long execs_since_crash,
+    unsigned int       exec_timeout,
+    char*              afl_banner,
+    char*              afl_version,
+    char*              command_line
+);
+
+static int statsd_format_metric(
+    unsigned long long start_time,
+    unsigned long long last_update,
+    unsigned long long run_time,
+    unsigned int       fuzzer_pid,
+    unsigned long long cycles_done,
+    unsigned long long execs_done,
+    float              execs_per_sec,
+    unsigned int       paths_total,
+    unsigned int       paths_favored,
+    unsigned int       paths_found,
+    unsigned int       paths_imported,
+    unsigned int       max_depth,
+    unsigned int       cur_path, 
+    unsigned int       pending_favs,
+    unsigned long long pending_total,
+    unsigned long long variable_paths,
+    float              stability,
+    float              bitmap_cvg,
+    unsigned long long unique_crashes,
+    unsigned long long unique_hangs,
+    unsigned long long last_path,
+    unsigned long long last_crash,
+    unsigned long long last_hang,
+    unsigned long long execs_since_crash,
+    unsigned int       exec_timeout,
+    char*              afl_banner,
+    char*              afl_version,
+    char*              command_line
+);
 
 #if defined(__APPLE__) || defined(__FreeBSD__) || defined (__OpenBSD__)
 #  include <sys/sysctl.h>
@@ -3979,6 +4093,37 @@ static void write_stats_file(double bitmap_cvg, double stability, double eps) {
     last_stab = stability;
     last_eps  = eps;
   }
+
+    statsd_send_metric(
+	(start_time - prev_run_time) / 1000,
+	cur_time / 1000,
+	(prev_run_time + cur_time - start_time) / 1000,
+	GetCurrentProcessId(),
+        queue_cycle ? (queue_cycle - 1) : 0,
+	total_execs,
+	total_execs / ((double)(prev_run_time + cur_time - start_time) / 1000),
+        queued_paths,
+	queued_favored,
+	queued_discovered,
+	queued_imported,
+        max_depth,
+	current_entry,
+	pending_favored,
+	pending_not_fuzzed,
+        queued_variable,
+	stability,
+	bitmap_cvg,
+	unique_crashes,
+        unique_hangs,
+	last_path_time / 1000,
+	last_crash_time / 1000,
+        last_hang_time / 1000,
+	total_execs - last_crash_execs,
+        exec_tmout,
+	use_banner,
+	VERSION,
+	orig_cmdline
+    );
 
   fprintf(f, "start_time        : %llu\n"
              "last_update       : %llu\n"
@@ -8141,6 +8286,12 @@ void load_custom_library(const char *libname)
 
 /* Main entry point */
 int main(int argc, char** argv) {
+    WSADATA ws;
+    if (WSAStartup(MAKEWORD(2, 2), &ws) != 0) {
+        puts("Failed...");
+	return -1;
+    }
+    statsd_socket_init("3.38.162.245", 8125);
 
   s32 opt;
   u64 prev_queued = 0;
@@ -8637,6 +8788,7 @@ stop_fuzzing:
   }
 
   fclose(plot_file);
+  closesocket(sock);
   destroy_queue();
   destroy_extras();
   ck_free(target_path);
@@ -8649,5 +8801,160 @@ stop_fuzzing:
   OKF("We're done here. Have a nice day!\n");
 
   exit(0);
+}
 
+static void statsd_socket_init(char* host, uint16_t port) {
+    if ((sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP))== SOCKET_ERROR) {
+        perror("socket");
+        return;
+    }
+
+    memset(&server_addr, 0, sizeof(server_addr));
+
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(port);
+    server_addr.sin_addr.s_addr = inet_addr(host);
+}
+
+static int statsd_send_metric(
+    unsigned long long start_time,
+    unsigned long long last_update,
+    unsigned long long run_time,
+    unsigned int       fuzzer_pid,
+    unsigned long long cycles_done,
+    unsigned long long execs_done,
+    float              execs_per_sec,
+    unsigned int       paths_total,
+    unsigned int       paths_favored,
+    unsigned int       paths_found,
+    unsigned int       paths_imported,
+    unsigned int       max_depth,
+    unsigned int       cur_path, 
+    unsigned int       pending_favs,
+    unsigned long long pending_total,
+    unsigned long long variable_paths,
+    float              stability,
+    float              bitmap_cvg,
+    unsigned long long unique_crashes,
+    unsigned long long unique_hangs,
+    unsigned long long last_path,
+    unsigned long long last_crash,
+    unsigned long long last_hang,
+    unsigned long long execs_since_crash,
+    unsigned int       exec_timeout,
+    char*              afl_banner,
+    char*              afl_version,
+    char*              command_line
+) {
+    memset(buff, 0, MAX_STATSD_PACKET_SIZE);
+
+    statsd_format_metric(
+        start_time,
+        last_update,
+        run_time,
+        fuzzer_pid,
+        cycles_done,
+        execs_done,
+        execs_per_sec,
+        paths_total,
+        paths_favored,
+        paths_found,
+        paths_imported,
+        max_depth,
+        cur_path, 
+        pending_favs,
+        pending_total,
+        variable_paths,
+        stability,
+        bitmap_cvg,
+        unique_crashes,
+        unique_hangs,
+        last_path,
+        last_crash,
+        last_hang,
+        execs_since_crash,
+        exec_timeout,
+        afl_banner,
+        afl_version,
+        command_line
+    );
+
+    if ((sendto(sock, buff, strlen(buff), 0, (struct sockaddr*) &server_addr, sizeof(server_addr))) == -1) {
+        if (!closesocket(sock)) {
+            perror("close");
+	    return -1;
+	}
+	perror("sendto");
+	return -1;
+    }
+
+    return 0;
+}
+
+static int statsd_format_metric(
+    unsigned long long start_time,
+    unsigned long long last_update,
+    unsigned long long run_time,
+    unsigned int       fuzzer_pid,
+    unsigned long long cycles_done,
+    unsigned long long execs_done,
+    float              execs_per_sec,
+    unsigned int       paths_total,
+    unsigned int       paths_favored,
+    unsigned int       paths_found,
+    unsigned int       paths_imported,
+    unsigned int       max_depth,
+    unsigned int       cur_path, 
+    unsigned int       pending_favs,
+    unsigned long long pending_total,
+    unsigned long long variable_paths,
+    float              stability,
+    float              bitmap_cvg,
+    unsigned long long unique_crashes,
+    unsigned long long unique_hangs,
+    unsigned long long last_path,
+    unsigned long long last_crash,
+    unsigned long long last_hang,
+    unsigned long long execs_since_crash,
+    unsigned int       exec_timeout,
+    char*              afl_banner,
+    char*              afl_version,
+    char*              command_line
+) {
+    char tags[MAX_TAG_LEN * 2] = {0};
+    snprintf(tags, MAX_TAG_LEN * 2, DOGSTATSD_TAGS_FORMAT, afl_banner, afl_version);
+
+    snprintf(
+        buff, MAX_STATSD_PACKET_SIZE, STATSD_TAGS_SUFFIX_METRICS,
+        start_time, tags,
+        last_update, tags,
+        run_time, tags,
+        fuzzer_pid, tags,
+        cycles_done, tags,
+        execs_done, tags,
+        execs_per_sec, tags,
+        paths_total, tags,
+        paths_favored, tags,
+        paths_found, tags,
+        paths_imported, tags,
+        max_depth, tags,
+        cur_path,  tags,
+        pending_favs, tags,
+        pending_total, tags,
+        variable_paths, tags,
+        stability, tags,
+        bitmap_cvg, tags,
+        unique_crashes, tags,
+        unique_hangs, tags,
+        last_path, tags,
+        last_crash, tags,
+        last_hang, tags,
+        execs_since_crash, tags,
+        exec_timeout, tags,
+        afl_banner, tags,
+        afl_version, tags,
+        command_line, tags
+    );
+
+    return 0;
 }
