@@ -8286,12 +8286,6 @@ void load_custom_library(const char *libname)
 
 /* Main entry point */
 int main(int argc, char** argv) {
-    WSADATA ws;
-    if (WSAStartup(MAKEWORD(2, 2), &ws) != 0) {
-        puts("Failed...");
-	return -1;
-    }
-    statsd_socket_init("3.38.162.245", 8125);
 
   s32 opt;
   u64 prev_queued = 0;
@@ -8319,10 +8313,25 @@ int main(int argc, char** argv) {
   dynamorio_dir = NULL;
   client_params = NULL;
   winafl_dll_path = NULL;
+  statsd_host = NULL;
+  statsd_port = 8125;
 
-  while ((opt = getopt(argc, argv, "+i:o:f:m:t:I:T:sdYnCB:S:M:x:QD:b:l:pPc:w:A:eV")) > 0)
+  while ((opt = getopt(argc, argv, "+i:o:f:m:t:I:T:sdYnCB:S:M:x:QD:b:l:pPc:w:A:eVH:S:")) > 0)
 
     switch (opt) {
+      case 'H': /* StatsD Host */
+
+        if (statsd_host) FATAL("Multiple -H options not supported");
+        statsd_host = optarg;
+
+        break;
+
+      case 'S': /* StatsD Port */
+
+        statsd_port = optarg;
+
+        break;
+
       case 's':
         
         if (use_sample_shared_memory) FATAL("Multiple -s options not supported");
@@ -8589,6 +8598,14 @@ int main(int argc, char** argv) {
     winafl_dll_path = "winafl.dll";
   } else if (expert_mode) {
     FATAL("-w and -e are mutually exclusive");
+  }
+
+  if (statsd_host) {
+    WSADATA ws;
+    if (WSAStartup(MAKEWORD(2, 2), &ws) != 0) {
+        FATAL("Failed to WSAStartup");
+    }
+    statsd_socket_init(statsd_host, statsd_port);
   }
 
   setup_signal_handlers();
